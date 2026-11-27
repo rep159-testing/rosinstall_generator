@@ -59,6 +59,42 @@ def get_package_names(distro):
     return released_names, unreleased_names
 
 
+def get_binary_import_parent_repositories(distro):
+    """
+    Return the repositories a distribution takes from its binary_import parents.
+
+    A REP 159 distribution (format 3) has its parents merged into it, and
+    rosdistro records in ``origin_distro`` the distribution that releases each
+    repository: the distribution itself for its own repositories and for those
+    of a ``source_rebuild`` parent, the parent for those of a
+    ``binary_import`` parent. The packages of the latter are installed as
+    binaries, not built from source. Without REP 159 the result is empty.
+
+    :returns: a dict mapping the repository names to their distribution
+    """
+    repos = {}
+    for repo_name, repo in distro.repositories.items():
+        origin = getattr(repo, 'origin_distro', None)
+        if origin and origin != distro.name:
+            repos[repo_name] = origin
+    return repos
+
+
+def get_binary_import_parent_packages(distro):
+    """
+    Return the packages a distribution takes from its binary_import parents.
+
+    :returns: a dict mapping the package names to their distribution
+    """
+    repos = get_binary_import_parent_repositories(distro)
+    packages = {}
+    for distro_packages in (distro.release_packages, distro.source_packages):
+        for pkg_name, pkg in distro_packages.items():
+            if pkg.repository_name in repos:
+                packages[pkg_name] = repos[pkg.repository_name]
+    return packages
+
+
 # redirect all output to logger
 class CustomLogger(object):
 
@@ -69,6 +105,28 @@ class CustomLogger(object):
     def write(self, buf):
         for line in buf.rstrip().splitlines():
             self.logger.log(logging.DEBUG, line.rstrip())
+
+
+DEPEND_TYPES = ['buildtool', 'buildtool_export', 'build', 'build_export', 'run', 'test']
+
+
+def get_direct_dependencies(distro, package_names, source=False):
+    """Return the names of the packages the given packages depend on directly."""
+    if source and distro.source_packages:
+        walker = SourceDependencyWalker(distro)
+    else:
+        walker = DependencyWalker(distro)
+    dependencies = set([])
+    # redirect all stderr output to logger
+    stderr = sys.stderr
+    sys.stderr = CustomLogger()
+    try:
+        for pkg_name in package_names:
+            for depend_type in DEPEND_TYPES:
+                dependencies |= walker.get_depends(pkg_name, depend_type)
+    finally:
+        sys.stderr = stderr
+    return dependencies
 
 
 def get_recursive_dependencies(distro, package_names, excludes=None, limit_depth=None, source=False):
@@ -86,7 +144,7 @@ def get_recursive_dependencies(distro, package_names, excludes=None, limit_depth
             try:
                 dependencies |= walker.get_recursive_depends(
                     pkg_name,
-                    ['buildtool', 'buildtool_export', 'build', 'build_export', 'run', 'test'],
+                    DEPEND_TYPES,
                     ros_packages_only=True,
                     ignore_pkgs=dependencies | excludes, limit_depth=limit_depth)
             except AssertionError as e:
@@ -118,7 +176,7 @@ def get_recursive_dependencies_on(distro, package_names, excludes=None, limit=No
         for pkg_name in package_names:
             dependencies |= walker.get_recursive_depends_on(
                 pkg_name,
-                ['buildtool', 'buildtool_export', 'build', 'build_export', 'run', 'test'],
+                DEPEND_TYPES,
                 ignore_pkgs=dependencies | excludes)
     finally:
         sys.stderr = stderr
