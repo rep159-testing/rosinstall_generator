@@ -45,6 +45,9 @@ from rospkg.environment import ROS_PACKAGE_PATH
 
 from rosinstall_generator.distro import get_distro as _get_wet_distro
 from rosinstall_generator.distro import generate_rosinstall as generate_wet_rosinstall
+from rosinstall_generator.distro import get_binary_import_parent_packages
+from rosinstall_generator.distro import get_binary_import_parent_repositories
+from rosinstall_generator.distro import get_direct_dependencies
 from rosinstall_generator.distro import get_recursive_dependencies as get_recursive_dependencies_of_wet
 from rosinstall_generator.distro import get_recursive_dependencies_on as get_recursive_dependencies_on_of_wet
 from rosinstall_generator.distro import get_package_names
@@ -60,6 +63,7 @@ logger = logging.getLogger('rosinstall_generator')
 
 ARG_ALL_PACKAGES = 'ALL'
 ARG_CURRENT_ENVIRONMENT = 'RPP'
+ARG_INCLUDE_BINARY_IMPORT_PARENTS = '--include-binary-import-parents'
 
 
 def _split_special_keywords(names):
@@ -232,6 +236,48 @@ def get_dry_distro(distro_name):
     return _dry_distro
 
 
+def _taken_from_binary_import_parents(distro_name, origins):
+    return "'%s' takes as binaries from its binary_import parents (%s)" % (
+        distro_name, ', '.join(sorted(set(origins))))
+
+
+def _without_binary_import_parent_packages(distro_name, names):
+    parent_packages = get_binary_import_parent_packages(get_wet_distro(distro_name))
+    left_out = set(names) & set(parent_packages)
+    if left_out:
+        logger.info("'%s' leaves out the %d packages that %s, use '%s' to include them" % (
+            ARG_ALL_PACKAGES, len(left_out),
+            _taken_from_binary_import_parents(distro_name, [parent_packages[n] for n in left_out]),
+            ARG_INCLUDE_BINARY_IMPORT_PARENTS))
+    return set(names) - left_out
+
+
+def _without_binary_import_parent_repositories(distro_name, repo_names):
+    parent_repos = get_binary_import_parent_repositories(get_wet_distro(distro_name))
+    left_out = set(repo_names) & set(parent_repos)
+    if left_out:
+        logger.info("'%s' leaves out the %d repositories that %s, use '%s' to include them" % (
+            ARG_ALL_PACKAGES, len(left_out),
+            _taken_from_binary_import_parents(distro_name, [parent_repos[n] for n in left_out]),
+            ARG_INCLUDE_BINARY_IMPORT_PARENTS))
+    return set(repo_names) - left_out
+
+
+def _log_binary_import_parent_dependencies(distro_name, distro, package_names, parent_packages, source):
+    named = set(package_names) & set(parent_packages)
+    if named:
+        logger.info('The named packages that %s are kept, without their dependencies: %s' % (
+            _taken_from_binary_import_parents(distro_name, [parent_packages[n] for n in named]),
+            ', '.join(sorted(named))))
+    own_names = set(package_names) - set(parent_packages)
+    left_out = get_direct_dependencies(distro, own_names, source=source) & set(parent_packages)
+    if left_out:
+        logger.info("The selected packages depend on %d packages that %s. They are left out: install them as binaries, or use '%s'. %s" % (
+            len(left_out),
+            _taken_from_binary_import_parents(distro_name, [parent_packages[n] for n in left_out]),
+            ARG_INCLUDE_BINARY_IMPORT_PARENTS, ', '.join(sorted(left_out))))
+
+
 def generate_rosinstall(distro_name, names,
     from_paths=None, repo_names=None,
     deps=False, deps_up_to=None, deps_depth=None, deps_only=False,
@@ -239,7 +285,8 @@ def generate_rosinstall(distro_name, names,
     excludes=None, exclude_paths=None,
     flat=False,
     tar=False,
-    upstream_version_tag=False, upstream_source_version=False):
+    upstream_version_tag=False, upstream_source_version=False,
+    include_binary_import_parents=False):
 
     # classify package/stack names
     names, pkg_keywords = _split_special_keywords(names)
@@ -259,6 +306,8 @@ def generate_rosinstall(distro_name, names,
     if ARG_ALL_PACKAGES in repo_keywords:
         wet_distro = get_wet_distro(distro_name)
         repo_names = wet_distro.repositories.keys()
+        if not include_binary_import_parents:
+            repo_names = _without_binary_import_parent_repositories(distro_name, repo_names)
 
     # expand repository names into package names
     repo_names, unknown_repo_names = _classify_repo_names(distro_name, repo_names)
@@ -276,7 +325,10 @@ def generate_rosinstall(distro_name, names,
     if unknown_names:
         logger.warn('The following unreleased packages/stacks will be ignored: %s' % (', '.join(sorted(unknown_names))))
     if pkg_keywords:
-        expanded_names, unknown_names = _classify_names(distro_name, _expand_keywords(distro_name, pkg_keywords), source=upstream_source_version)
+        keyword_names = _expand_keywords(distro_name, pkg_keywords)
+        if ARG_ALL_PACKAGES in pkg_keywords and not include_binary_import_parents:
+            keyword_names = _without_binary_import_parent_packages(distro_name, keyword_names)
+        expanded_names, unknown_names = _classify_names(distro_name, keyword_names, source=upstream_source_version)
         if unknown_names:
             logger.warn('The following unreleased packages/stacks from the %s will be ignored: %s' % (ROS_PACKAGE_PATH, ', '.join(sorted(unknown_names))))
         names.update(expanded_names)
@@ -360,8 +412,12 @@ def generate_rosinstall(distro_name, names,
             wet_distro = get_wet_distro(distro_name)
             _, unreleased_package_names = get_package_names(wet_distro)
             excludes = exclude_names.wet_package_names | deps_up_to_names.wet_package_names | set(unreleased_package_names)
-            result.wet_package_names |= get_recursive_dependencies_of_wet(wet_distro, result.wet_package_names, excludes=excludes,
+            # the walk stops at the packages of binary_import parents (REP 159)
+            parent_packages = {} if include_binary_import_parents else get_binary_import_parent_packages(wet_distro)
+            result.wet_package_names |= get_recursive_dependencies_of_wet(wet_distro, result.wet_package_names, excludes=excludes | set(parent_packages),
                     limit_depth=deps_depth, source=upstream_source_version)
+            if parent_packages:
+                _log_binary_import_parent_dependencies(distro_name, wet_distro, result.wet_package_names, parent_packages, upstream_source_version)
             logger.debug('Wet packages including dependencies: %s' % ', '.join(sorted(result.wet_package_names)))
 
     # intersect result with recursive dependencies on

@@ -98,6 +98,9 @@ def main(argv=sys.argv[1:]):
     parser.add_argument('--exclude-path', type=_existing_directory, nargs='*',
         help='Exclude a set of catkin packages found recursively under the given path (also skips further recursive dependencies).')
 
+    parser.add_argument('--include-binary-import-parents', action='store_true', default=False,
+        help="For a distribution that extends others (REP 159): also select the packages it takes from its 'binary_import' parents. By default the recursive dependencies, '%s' and '--repos %s' leave them out, since they are installed as binaries." % (ARG_ALL_PACKAGES, ARG_ALL_PACKAGES))
+
     parser.add_argument('--flat', action='store_true', default=False,
         help='Use a flat folder structure without a parent folder names after the repository containing the catkin packages')
 
@@ -160,7 +163,8 @@ def main(argv=sys.argv[1:]):
             excludes=args.exclude, exclude_paths=args.exclude_path,
             flat=args.flat,
             tar=args.tar,
-            upstream_version_tag=args.upstream, upstream_source_version=args.upstream_development)
+            upstream_version_tag=args.upstream, upstream_source_version=args.upstream_development,
+            include_binary_import_parents=args.include_binary_import_parents)
     except RuntimeError as e:
         if args.debug:
             raise
